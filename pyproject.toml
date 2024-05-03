@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "y"
+version = "y"
+description = "Hybrid Forecasting"
+authors = ["Giordano Alvari"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "y"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
