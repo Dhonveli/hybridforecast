@@ -1,112 +1,130 @@
 import inspect
-import pdb
 from typing import Any, Callable, Dict, Optional, Union
 
 import pandas as pd
 
+import pdb
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import pandas as pd
+
+
 class HybridForecast:
     """
     Hybrid Forecasting model that decomposes time series into components and forecasts each component separately
+
+    Attributes:
+        decomposition_model (Callable): decomposition model (e.g. statsmodels.MSTL, statsmodels.STL)
+        trend_models (List[Callable]): trend models (e.g. MLForecast, StatsForecast, NeuralForecast)
+        seasonal_models (Dict[str, Callable]): seasonal models (e.g. MLForecast, StatsForecast, NeuralForecast)
+        resid_models (List[Callable]): resid models (e.g. MLForecast, StatsForecast, NeuralForecast)
+        decomposition_kwargs (Dict[str, Any]): decomposition model kwargs
+        trend_kwargs (Dict[str, Any]): trend model kwargs
+        seasonal_kwargs (Dict[str, Dict[str, Any]]): seasonal model kwargs
+        resid_kwargs (Dict[str, Any]): resid model kwargs
     """
 
     def __init__(
         self,
         decomposition_model: Callable,
-        trend_models: Callable,
-        seasonal_models: Dict[
-            str,
-            Callable,
-        ],
-        error_models: Callable,
+        trend_model: Callable,
+        seasonal_model: Dict[str, Callable],
+        resid_model: Callable,
         decomposition_kwargs: Dict[str, Any] = {},
         trend_kwargs: Dict[str, Any] = {},
         seasonal_kwargs: Dict[str, Dict[str, Any]] = {},
-        error_kwargs: Dict[str, Any] = {},
+        resid_kwargs: Dict[str, Any] = {},
+        agg: str = "additive",
     ):
         """
-        Args:
-            decomposition_model: decomposition model (e.g. statsmodels.MSTL, statsmodels.STL)
-            trend_models: trend models (e.g. MLForecast, StatsForecast, NeuralForecast)
-            seasonal_models: seasonal models (e.g. MLForecast, StatsForecast, NeuralForecast)
-            error_models: error models (e.g. MLForecast, StatsForecast, NeuralForecast)
-            decomposition_kwargs: decomposition model kwargs
-            trend_kwargs: trend model kwargs
-            seasonal_kwargs: seasonal model kwargs
-            error_kwargs: error model kwargs
+        Initialize HybridForecast object
 
-        Returns:
-            None
+        Args:
+            decomposition_model (Callable): decomposition model
+            trend_models (List[Callable]): trend models
+            seasonal_models (Dict[str, Callable]): seasonal models
+            resid_models (List[Callable]): resid models
+            decomposition_kwargs (Dict[str, Any], optional): decomposition model kwargs. Defaults to {}.
+            trend_kwargs (Dict[str, Any], optional): trend model kwargs. Defaults to {}.
+            seasonal_kwargs (Dict[str, Dict[str, Any]], optional): seasonal model kwargs. Defaults to {}.
+            resid_kwargs (Dict[str, Any], optional): resid model kwargs. Defaults to {}.
+            agg (str, optional): aggregation function. Defaults to "additive".
         """
 
         self.decomposition_model = decomposition_model
-        self.trend_models = trend_models
-        self.seasonal_models = seasonal_models
-        self.error_models = error_models
+        self.trend_model = trend_model
+        self.seasonal_model = seasonal_model
+        self.resid_model = resid_model
 
         self.decomposition_kwargs = decomposition_kwargs
         self.trend_kwargs = trend_kwargs
         self.seasonal_kwargs = seasonal_kwargs
-        self.error_kwargs = error_kwargs
+        self.resid_kwargs = resid_kwargs
+        self.agg = agg
 
-    def _decomposition(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _decompose_ts(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Decompose time series into components
 
         Args:
-            df: input data
+            df (pd.DataFrame): input data
 
         Returns:
             pd.DataFrame: data frame with components
         """
+        
+        components = pd.DataFrame()
+        
+        for id in df["unique_id"].unique():
+            
+            df_temp = df[df["unique_id"] == id]
+            df_temp = df_temp.sort_values(by="ds")
+            
+            target = df_temp["y"]
+            target.index = df_temp["ds"]
 
-        df_copy = df.copy()
-        target = df["y"]
-        target.index = df["ds"]
+            res = self.decomposition_model(target, **self.decomposition_kwargs).fit()
 
-        res = self.decomposition_model(target, **self.decomposition_kwargs).fit()
+            if len(res.seasonal.shape) == 1:
+                component_tmp = pd.concat(
+                    [res.resid, res.trend, res.seasonal], axis=1, keys=["resid", "trend", "seasonal"]
+                )
+            else:
+                components_tmp = pd.concat(
+                    [res.resid, res.trend],
+                    axis=1,
+                    keys=["resid", "trend"],
+                )
+                
+                components_tmp = pd.merge(
+                    components_tmp, res.seasonal, left_index=True, right_index=True
+                )
 
-        resid = res.resid
-        trend = res.trend
-        seasonal = res.seasonal
-
-        components = pd.concat([resid, trend, seasonal], axis=1)
-        components.reset_index(inplace=True)
-        pdb.set_trace()
-
-        if "period" in self.decomposition_kwargs:
-            assert components.shape[1] - 3 == len(self.decomposition_kwargs["period"])
-            components.columns = ["ds", "resid", "trend"] + [
-                f"seasonal_{i}" for i in self.decomposition_kwargs["period"]
-            ]
-        elif "periods" in self.decomposition_kwargs:
-            assert components.shape[1] - 3 == len(self.decomposition_kwargs["periods"])
-            components.columns = ["ds", "resid", "trend"] + [
-                f"seasonal_{i}" for i in self.decomposition_kwargs["periods"]
-            ]
-        else:
-            assert components.shape[1] - 3 == 1
-            components.columns = ["ds", "resid", "trend", "seasonal"]
-
-        # rename columns based on seasonal_{period}
-        return pd.merge(
-            df_copy[["y", "ds", "unique_id"]], components, on="ds", how="inner"
-        )
+            components_tmp.reset_index(inplace=True)
+            components_tmp["unique_id"] = id
+        
+            components = pd.concat([components, components_tmp])
+            
+        return pd.merge(df[["y", "ds", "unique_id"]], components, on=["ds", "unique_id"], how="inner")
 
     def _fit_model(
-        self, df: pd.DataFrame, model, static_features=[], dynamic_features=[]
+        self,
+        df: pd.DataFrame,
+        model:Callable,
+        static_features: List[str] = [],
+        dynamic_features: List[str] = [],
     ) -> Any:
         """
         Fit model
 
         Args:
-            df: input data
-            model: model
-            static_features: static features
-            dynamic_features: dynamic features
+            df (pd.DataFrame): input data
+            model (Callable): model
+            static_features (List[str], optional): static features. Defaults to [].
+            dynamic_features (List[str], optional): dynamic features. Defaults to [].
 
         Returns:
-            model: fitted model
-
+            Any: fitted model
         """
 
         df = df[["unique_id", "ds", "y"] + dynamic_features + static_features]
@@ -120,224 +138,170 @@ class HybridForecast:
 
         return model
 
-    def _pred_model(
+    def _predict_model(
         self,
-        model,
+        model: Callable,
         h: int,
-        X_df: Optional[pd.DataFrame] = None,
-        dynamic_features=None,
+        X_df: Optional[pd.DataFrame],
     ) -> pd.DataFrame:
         """
         Predict model
 
         Args:
-            model: model
-            h: forecast horizon
-            X_df: exogenous features
-            dynamic_features: dynamic features
+            model (Callable): model
+            h (int): forecast horizon
+            X_df (Optional[pd.DataFrame], optional): exogenous features. Defaults to None.
 
         Returns:
             pd.DataFrame: predictions
         """
 
-        if dynamic_features:
-            X_df = X_df[["unique_id", "ds"] + dynamic_features]
+        if X_df.shape[1] > 2:
             return model.predict(h=h, X_df=X_df)
         else:
             return model.predict(h=h)
 
     def _combine_predictions(
-        self, predictions: Dict[str, pd.DataFrame], agg="additive"
+        self, predictions: Dict[str, pd.DataFrame], aggregation: str = "additive"
     ) -> pd.DataFrame:
         """
-        Combine predictions
+        Combine predictions by component.
 
         Args:
-            predictions: dict with predictions
-            agg: aggregation method
+            predictions (Dict[str, pd.DataFrame]): Dictionary of component predictions.
+            aggregation (str, optional): Aggregation method. Defaults to "additive".
 
         Returns:
-            pd.DataFrame: combined predictions
+            pd.DataFrame: Combined predictions.
         """
 
-        # combine predictions
+        combined_df = pd.DataFrame()
+        
         idx = 0
-        combination_df = pd.DataFrame()
 
-        # iterate over components
-        for comb, prediction in predictions.items():
-
-            # check if unique_id column is present
-            if "unique_id" in prediction.columns:
-                prediction_copy = prediction.copy()
+        for component, prediction in predictions.items():
+            if 'unique_id' in prediction.columns:
+                prediction_df = prediction.reset_index(drop=True).copy()
             else:
-                prediction_copy = prediction.reset_index().copy()
+                prediction_df = prediction.reset_index(drop=False).copy()
 
-            model_cols = [
-                col for col in prediction_copy.columns if col not in ["unique_id", "ds"]
+            prediction_df.rename(columns={col : f"{component}_{col}" for col in prediction_df.columns if col not in ["unique_id", "ds"]}, inplace=True)
+            model_columns = [
+                col for col in prediction_df.columns if col not in ["unique_id", "ds"]
             ]
-
-            # init dataframes
             if idx == 0:
-                prediction_df = prediction_copy[["unique_id", "ds"]]
+                combined_df = prediction_df.copy()
+                old_combined_columns = [col for col in combined_df.columns if col not in ["unique_id", "ds"]]
                 idx += 1
-                for col in model_cols:
-                    prediction_df[f"{comb}_{col}"] = prediction_copy[col]
-                    combination_df = prediction_df.copy()
             else:
-                combination_cols = [
-                    col
-                    for col in combination_df.columns
-                    if col not in ["unique_id", "ds"]
-                ]
-                for col in model_cols:
-                    prediction_df[f"{comb}_{col}"] = prediction_copy[col]
-
-                    # combine predictions
-                    for col_comb in combination_cols:
-                        if agg == "additive":
-                            combination_df[f"{col_comb}_{comb}_{col}"] = (
-                                prediction_copy[col] + combination_df[col_comb]
+                combined_df = pd.merge(combined_df, prediction_df, on=["unique_id", "ds"], how="outer")
+                old_combined_columns_new = []
+                for column in model_columns:
+                    for combined_column in old_combined_columns:
+                        if aggregation == "additive":
+                            combined_df[f"{combined_column}_{column}"] = (
+                                combined_df[combined_column] + prediction_df[column]
                             )
-                        elif agg == "multiplicative":
-                            combination_df[f"{col_comb}_{comb}_{col}"] = (
-                                prediction_copy[col] * combination_df[col_comb]
+                        elif aggregation == "multiplicative":
+                            combined_df[f"{combined_column}_{column}"] = (
+                                combined_df[combined_column] *prediction_df[column]
                             )
-                combination_df.drop(columns=combination_cols, inplace=True)
+                        old_combined_columns_new.append(f"{combined_column}_{column}")
+                if idx != 1:
+                    combined_df.drop(columns=old_combined_columns, inplace=True)
+                idx += 1
+                old_combined_columns = old_combined_columns_new     
 
-        return prediction_df.merge(combination_df, on=["unique_id", "ds"])
+        return combined_df
 
-    def fit(self, df: pd.DataFrame) -> None:
+    def fit(self, data: pd.DataFrame) -> None:
         """
-        Fit model
+        Fit the model to the data.
 
         Args:
-            df: input data
+            data (pd.DataFrame): Input data.
 
         Returns:
             None
         """
 
-        self.components_df = self._decomposition(df)
-        components_names = self.components_df.columns.drop(["ds", "unique_id", "y"])
+        self.components_df = self._decompose_ts(data)
+        components = self.components_df.columns.drop(["ds", "unique_id", "y"])
 
-        # forecast components in parallel (not trend)
-        self.model_error_fitted = None
-        self.model_trend_fitted = None
-        self.model_seasonal_fitted = {}
+        self.fitted_models : Dict[str, Dict[str, Any]] = {
+            "trend": {},
+            "seasonal": {},
+            "resid": {}
+        }
 
-        for component in components_names:
-            print(f"fitting {component}")
-            if component == "trend":
-                df_trend = self.components_df[["unique_id", "ds", component]].rename(
-                    columns={component: "y"}
-                )
+        for component in components:
+            df = self.components_df[["unique_id", "ds", component]].rename(
+                columns={component: "y"}
+            )
+            dynamic_features = self.get_kwargs(component, "dynamic_features")
+            static_features = self.get_kwargs(component, "static_features")
+            df_copy = data[static_features + dynamic_features + ["unique_id", "ds"]]
 
-                # get list exogenous features for trend
-                dynamic_features = self.trend_kwargs.get("dynamic_features", [])
-                static_features = self.trend_kwargs.get("static_features", [])
+            df = df.merge(df_copy, on=["unique_id", "ds"], how="left")
 
-                # create df with exogenous features
-                df_copy = df[
-                    static_features + dynamic_features + ["unique_id", "ds"]
-                ].copy()
-                df_trend = df_trend.merge(df_copy, on=["unique_id", "ds"])
+            self.fitted_models[component] = self._fit_model(
+                df,
+                self.get_model(component),
+                static_features,
+                dynamic_features,
+            )
 
-                self.model_trend_fitted = self._fit_model(
-                    df_trend,
-                    self.trend_models,
-                    static_features=static_features,
-                    dynamic_features=dynamic_features,
-                )
+    def get_kwargs(self, component, key):
+        """Get the value of a given key from the kwargs dictionary based on the component."""
+        return self.get_model_kwargs(component).get(key, [])
 
-            elif component == "resid":
+    def get_model(self, component):
+        """Get the model based on the component."""
+        return (
+            self.trend_model
+            if component == "trend"
+            else self.seasonal_model[component]
+            if component.startswith("seasonal")
+            else self.resid_model
+            if component == "resid"
+            else None
+        )
 
-                df_resid = self.components_df[["unique_id", "ds", component]].rename(
-                    columns={component: "y"}
-                )
-
-                # get list exogenous features for resid
-                dynamic_features = self.error_kwargs.get("dynamic_features", [])
-                static_features = self.error_kwargs.get("static_features", [])
-
-                # create df with exogenous features
-                df_copy = df[
-                    static_features + dynamic_features + ["unique_id", "ds"]
-                ].copy()
-                df_resid = df_resid.merge(df_copy, on=["unique_id", "ds"])
-
-                self.model_error_fitted = self._fit_model(
-                    df_resid,
-                    self.error_models,
-                    static_features=static_features,
-                    dynamic_features=dynamic_features,
-                )
-
-            elif "seasonal" in component:
-
-                df_seasonal = self.components_df[["unique_id", "ds", component]].rename(
-                    columns={component: "y"}
-                )
-
-                # get list exogenous features for seasonal
-                dynamic_features = self.seasonal_kwargs.get("dynamic_features", [])
-                static_features = self.seasonal_kwargs.get("static_features", [])
-
-                # create df with exogenous features
-                df_copy = df[
-                    static_features + dynamic_features + ["unique_id", "ds"]
-                ].copy()
-                df_seasonal = df_seasonal.merge(df_copy, on=["unique_id", "ds"])
-
-                self.model_seasonal_fitted[component] = self._fit_model(
-                    df_seasonal,
-                    self.seasonal_models[component],
-                    static_features=static_features,
-                    dynamic_features=dynamic_features,
-                )
-
-            else:
-                raise ValueError(f" {component} not recognized")
+    def get_model_kwargs(self, component):
+        """Get the kwargs dictionary based on the component."""
+        return (
+            self.trend_kwargs
+            if component == "trend"
+            else self.seasonal_kwargs.get(component, {})
+            if component.startswith("seasonal")
+            else self.resid_kwargs
+            if component == "resid"
+            else None
+        )
 
     def predict(self, h: int, X_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """
-        Predict model
+        Predicts the model's future values based on the given forecast horizon.
 
         Args:
-            h: forecast horizon
-            X_df: exogenous features
+            h (int): The number of time steps to forecast into the future.
+            X_df (Optional[pd.DataFrame], optional): exogenous features. Defaults to None.
 
         Returns:
-            pd.DataFrame: predictions
+            pd.DataFrame: A DataFrame containing the predicted values for the trend, seasonal components, and residuals.
         """
 
-        components_names = self.components_df.columns.drop(["ds", "unique_id", "y"])
-
         predictions = {}
-        # forecast components in parallel (not trend)
-        for component in components_names:
-            print(f"predicting {component}")
-            if component == "trend":
-                predictions[component] = self._pred_model(
-                    self.model_trend_fitted,
-                    h=h,
-                    X_df=X_df,
-                    dynamic_features=self.trend_kwargs.get("dynamic_features", None),
-                )
-            elif component == "resid":
-                predictions[component] = self._pred_model(
-                    self.model_error_fitted,
-                    h=h,
-                    X_df=X_df,
-                    dynamic_features=self.error_kwargs.get("dynamic_features", None),
-                )
+        dynamic_features = {}
 
-            elif "seasonal" in component:
-                predictions[component] = self._pred_model(
-                    self.model_seasonal_fitted[component],
-                    h=h,
-                    X_df=X_df,
-                    dynamic_features=self.seasonal_kwargs.get("dynamic_features", None),
-                )
+        # Predict trend and seasonal components
+        for component in ["trend", *self.seasonal_model.keys(), "resid"]:
+            model_kwargs = self.get_model_kwargs(component)
+            dynamic_features[component] = model_kwargs.get("dynamic_features", [])
+            predictions[component] = self._predict_model(
+                model = self.fitted_models[component],
+                h = h,
+                X_df=X_df[["unique_id", "ds"] + dynamic_features[component]].reset_index(drop=True),
+            )
 
-        return self._combine_predictions(predictions)
+        return self._combine_predictions(predictions, aggregation=self.agg)

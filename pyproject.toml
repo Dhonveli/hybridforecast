@@ -1,12 +1,13 @@
 [tool.poetry]
-name = "y"
-version = "y"
+name = "HybridForecast"
+version = "0.1.0"
 description = "Hybrid Forecasting"
 authors = ["Giordano Alvari"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "y"
+python = ">=3.9"
+pandas = "^2.2.2"
 
 
 [build-system]

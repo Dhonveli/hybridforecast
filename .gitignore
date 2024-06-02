@@ -1,3 +1,18 @@
+Copy
+Insert
+# Ignore all data and notebooks folders
+data/*
+notebooks/*
+dist/*
 
-./data/*
-./notebooks/*
+# Ignore macOS specific files
+.DS_Store
+
+# Ignore poetry lock file
+poetry.lock
+
+# Ignore specific files
+prova.py
+
+# Ignore Python cache files
+__pycache__/
